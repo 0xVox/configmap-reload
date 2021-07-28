@@ -31,7 +31,10 @@ var (
 	metricPath        = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
 	subEnv            = flag.Bool("envsubst", false, "Enable envsubst substitution after reloading the file. Can only be used with ONE file.")
 	subDestination    = flag.String("destinationpath", "", "Suffix to prepend to substituted file.")
-	subFile           = flag.String("envsubst.file", "", "the filename inside -volume to substitute env vars into.")
+	// subFile - argument is necessary because the fsnotify events trigger for the `..data` file in the configmap's
+	// directory but not the symlinks to individual files. So we need to provide the name of the file we wish to run envsubst on.
+	// There are cleaner ways to put this - but it works for now.
+	subFile = flag.String("envsubst.file", "", "the filename inside -volume to substitute env vars into.")
 
 	lastReloadError = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
