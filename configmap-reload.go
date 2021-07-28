@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -11,11 +12,13 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/a8m/envsubst"
 	fsnotify "github.com/fsnotify/fsnotify"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+const version = "0.6"
 const namespace = "configmap_reload"
 
 var (
@@ -26,6 +29,9 @@ var (
 	webhookRetries    = flag.Int("webhook-retries", 1, "the amount of times to retry the webhook reload request")
 	listenAddress     = flag.String("web.listen-address", ":9533", "Address to listen on for web interface and telemetry.")
 	metricPath        = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
+	subEnv            = flag.Bool("envsubst", false, "Enable envsubst substitution after reloading the file. Can only be used with ONE file.")
+	subDestination    = flag.String("destinationpath", "", "Suffix to prepend to substituted file.")
+	subFile           = flag.String("envsubst.file", "", "the filename inside -volume to substitute env vars into.")
 
 	lastReloadError = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
@@ -69,6 +75,7 @@ func init() {
 }
 
 func main() {
+	fmt.Printf("0xVox ConfigMap Reload v%s\n", version)
 	flag.Var(&volumeDirs, "volume-dir", "the config map volume directory to watch for updates; may be used multiple times")
 	flag.Var(&webhook, "webhook-url", "the url to send a request to when the specified config map volume directory has been updated")
 	flag.Parse()
@@ -101,6 +108,9 @@ func main() {
 					continue
 				}
 				log.Println("config map updated")
+				if *subEnv {
+					envsubstFile(event.Name)
+				}
 				for _, h := range webhook {
 					begun := time.Now()
 					req, err := http.NewRequest(*webhookMethod, h.String(), nil)
@@ -165,6 +175,40 @@ func main() {
 	log.Fatal(serverMetrics(*listenAddress, *metricPath))
 }
 
+func envsubstFile(filePath string) error {
+
+	if *subDestination == "" {
+		log.Fatal("You must set a destinationpath for the substituted file")
+	}
+
+	dir, _ := filepath.Split(filePath)
+	srcPath := filepath.Join(dir, *subFile)
+	destPath := filepath.Join(*subDestination, *subFile)
+
+	log.Printf("Substitute env vars in %s to destination %s", srcPath, destPath)
+
+	fi, err := os.Lstat(srcPath)
+	dat, err := ioutil.ReadFile(srcPath)
+	if err != nil {
+		log.Printf("Could not read file from fs event: %s, %s", srcPath, err)
+		return err
+	}
+
+	buf, err := envsubst.Bytes(dat)
+	if err != nil {
+		log.Printf("error substituting env vars: %s\n", err)
+		return err
+	}
+
+	err = os.WriteFile(destPath, buf, fi.Mode())
+	if err != nil {
+		log.Println("failed writing substituted file")
+		return err
+	}
+
+	return nil
+}
+
 func setFailureMetrics(h, reason string) {
 	requestErrorsByReason.WithLabelValues(h, reason).Inc()
 	lastReloadError.WithLabelValues(h).Set(1.0)
@@ -177,9 +221,11 @@ func setSuccessMetrics(h string, begun time.Time) {
 }
 
 func isValidEvent(event fsnotify.Event) bool {
-	if event.Op&fsnotify.Create != fsnotify.Create {
+	log.Printf("event: %s", event)
+	if event.Op != fsnotify.Create {
 		return false
 	}
+
 	if filepath.Base(event.Name) != "..data" {
 		return false
 	}
